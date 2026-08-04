@@ -15,6 +15,7 @@ import {
   findConflicts,
   promoteFiles,
 } from "../git/promote.js";
+import { VERSION } from "../version.js";
 
 function startWorktrees(indices: number[]): string {
   const ctx = buildContext();
@@ -122,7 +123,7 @@ function promoteWorktree(index: number): string {
 export async function startMcpServer(): Promise<void> {
   const server = new McpServer({
     name: "worktree-compose",
-    version: "0.1.0",
+    version: VERSION,
   });
 
   server.tool(

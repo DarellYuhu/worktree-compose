@@ -8,13 +8,14 @@ import { promoteCommand } from "./commands/promote.js";
 import { cleanCommand } from "./commands/clean.js";
 import { startMcpServer } from "./mcp/server.js";
 import { error } from "./utils/log.js";
+import { VERSION } from "./version.js";
 
 const program = new Command();
 
 program
   .name("wtc")
   .description("Zero-config Docker Compose isolation for git worktrees")
-  .version("0.1.0");
+  .version(VERSION);
 
 program
   .command("start")
