@@ -50,6 +50,22 @@ export function allocateWorktreePorts(
   return allocations;
 }
 
+/**
+ * Environment variables for a `docker compose` invocation so `${VAR}`
+ * interpolation resolves to the allocated ports. Shell environment values take
+ * precedence over `.env` files, which makes this independent of the configured
+ * env filename — Compose never reads `.env.development` (or any custom name)
+ * for interpolation, only the project `.env`, `--env-file`, and the process
+ * environment.
+ */
+export function allocationEnv(
+  allocations: PortAllocation[],
+): Record<string, string> {
+  return Object.fromEntries(
+    allocations.map((a) => [a.envVar, String(a.port)]),
+  );
+}
+
 export interface PortCollisionParty {
   worktreeIndex: number;
   serviceName: string;

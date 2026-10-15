@@ -1,6 +1,7 @@
 import {
   allocatePort,
   allocateWorktreePorts,
+  allocationEnv,
   detectCrossWorktreeCollisions,
   recommendPortStride,
 } from "../../src/ports/allocate.js";
@@ -148,5 +149,30 @@ describe("cross-worktree collision detection", () => {
     ];
     expect(() => recommendPortStride(highPort, 2)).not.toThrow();
     expect(recommendPortStride(highPort, 2)).toBe(-1);
+  });
+});
+
+describe("allocationEnv", () => {
+  it("maps allocated ports to string environment values", () => {
+    const env = allocationEnv([
+      {
+        serviceName: "postgres",
+        envVar: "POSTGRES_PORT",
+        port: 25434,
+        containerPort: 5432,
+      },
+      {
+        serviceName: "backend",
+        envVar: "BACKEND_PORT",
+        port: 28001,
+        containerPort: 8000,
+      },
+    ]);
+
+    expect(env).toEqual({ POSTGRES_PORT: "25434", BACKEND_PORT: "28001" });
+  });
+
+  it("returns an empty object when nothing is allocatable", () => {
+    expect(allocationEnv([])).toEqual({});
   });
 });

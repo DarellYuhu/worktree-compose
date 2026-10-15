@@ -1,7 +1,7 @@
 import path from "node:path";
 import { buildContext, filterWorktrees, getEnvTargets } from "../context.js";
 import type { EnvCliOptions } from "../context.js";
-import { allocateWorktreePorts } from "../ports/allocate.js";
+import { allocateWorktreePorts, allocationEnv } from "../ports/allocate.js";
 import { composeProjectName } from "../utils/sanitize.js";
 import { execLive } from "../utils/exec.js";
 import { syncWorktreeFiles } from "../sync/files.js";
@@ -67,7 +67,11 @@ export function startCommand(
 
     execLive(`docker compose -p "${project}" up -d --build`, {
       cwd: wt.path,
-      env: { ...process.env, COMPOSE_PROJECT_NAME: project },
+      env: {
+        ...process.env,
+        COMPOSE_PROJECT_NAME: project,
+        ...allocationEnv(allocations),
+      },
     });
 
     log.success(`Worktree ${idx} started`);

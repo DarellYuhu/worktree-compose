@@ -3,7 +3,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { z } from "zod";
 import { buildContext, filterWorktrees, getEnvTargets } from "../context.js";
 import type { EnvCliOptions } from "../context.js";
-import { allocateWorktreePorts } from "../ports/allocate.js";
+import { allocateWorktreePorts, allocationEnv } from "../ports/allocate.js";
 import { composeProjectName } from "../utils/sanitize.js";
 import { exec, execSafe } from "../utils/exec.js";
 import { syncWorktreeFiles } from "../sync/files.js";
@@ -43,7 +43,14 @@ function startWorktrees(indices: number[], cli: EnvCliOptions = {}): string {
       injectPortOverrides(envPath, allocations, target.overrides);
     }
 
-    exec(`docker compose -p "${project}" up -d --build`, { cwd: wt.path });
+    exec(`docker compose -p "${project}" up -d --build`, {
+      cwd: wt.path,
+      env: {
+        ...process.env,
+        COMPOSE_PROJECT_NAME: project,
+        ...allocationEnv(allocations),
+      },
+    });
 
     const ports = allocations.map((a) => `${a.envVar}=${a.port}`).join(", ");
     results.push(`Worktree ${idx} (${wt.branch}): started [${ports}]`);

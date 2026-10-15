@@ -299,6 +299,8 @@ FRONTEND_PORT=25174
 
 Re-running `wtc start` strips and rewrites the block, so it never accumulates.
 
+The allocated ports are also exported into the environment of the `docker compose` process `wtc` launches. Compose resolves `${VAR:-default}` from the process environment, `--env-file`, and the project `.env` — never from a service's `env_file:`, and never from a custom filename like `.env.development`. Exporting the ports is what keeps published host ports correct when the project uses a custom `envFile`.
+
 ## Commands
 
 ### `wtc start [indices...]`
@@ -492,6 +494,8 @@ npx wtc clean
 **"No extra worktrees found"** — Create worktrees first: `git worktree add ../my-feature my-branch`
 
 **Ports not changing** — Use `${VAR:-default}` for host ports, not hardcoded numbers.
+
+**"Bind for 0.0.0.0:5433 failed: port is already allocated" with a custom `envFile`** — Compose interpolation does not read `.env.development` (or `env_file:`) entries for `${VAR}` substitution; it only reads the process environment, `--env-file`, and the project `.env`. `wtc` handles this by exporting allocated ports into the compose process environment. If you run `docker compose` yourself, export the port (e.g. `POSTGRES_PORT=25435 docker compose up`) or pass `--env-file .env.development`.
 
 **Stale containers** — Run `wtc clean`, or manually: `docker ps -a --filter "name=-wt-" -q | xargs docker rm -f`
 
