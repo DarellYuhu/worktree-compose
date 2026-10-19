@@ -249,10 +249,21 @@ function findWorkspace(
       `libs/${name}`,
     ]) {
       const abs = path.join(repoRoot, candidate);
+      const rel = path.relative(repoRoot, abs).split(path.sep).join("/");
+      // Candidates are caller input: never accept a path that escapes (or
+      // resolves to) the repo root, e.g. `--workspace ../other`. Keep `.dir`
+      // repo-relative and POSIX-normalized, matching declared workspaces.
+      if (
+        rel === "" ||
+        rel.split("/")[0] === ".." ||
+        path.isAbsolute(rel)
+      ) {
+        continue;
+      }
       const pkg = readJson(path.join(abs, "package.json"));
       if (!pkg) continue;
       return {
-        dir: candidate,
+        dir: rel,
         absDir: abs,
         name:
           typeof pkg.name === "string" && pkg.name

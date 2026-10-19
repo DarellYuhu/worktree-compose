@@ -102,4 +102,65 @@ describe("getEnvTargets", () => {
       getEnvTargets(contextFor(repoRoot, { workspaces: ["nope"] })),
     ).toThrow(/Workspace "nope" not found/);
   });
+
+  describe("with two workspaces sharing a directory basename", () => {
+    beforeEach(() => {
+      writeJson(path.join(repoRoot, "package.json"), {
+        name: "ruker",
+        private: true,
+        workspaces: ["apps/*", "packages/*"],
+      });
+      writeJson(path.join(repoRoot, "apps/server/package.json"), {
+        name: "@ruker/server-a",
+      });
+      writeJson(path.join(repoRoot, "packages/server/package.json"), {
+        name: "@ruker/server-b",
+      });
+    });
+
+    it("does not apply a basename key shared by two selected workspaces", () => {
+      const shared = { SHARED: "wrong" };
+      const targets = getEnvTargets(
+        contextFor(repoRoot, {
+          workspaces: ["apps/server", "packages/server"],
+          workspaceEnvOverrides: {
+            // "server" matches both directory basenames here.
+            server: shared,
+          },
+        }),
+      );
+
+      expect(targets[1].overrides).toBeUndefined();
+      expect(targets[2].overrides).toBeUndefined();
+    });
+
+    it("still reaches ambiguous workspaces by full path or package name", () => {
+      const byPath = { FROM: "path" };
+      const byName = { FROM: "name" };
+      const targets = getEnvTargets(
+        contextFor(repoRoot, {
+          workspaces: ["apps/server", "packages/server"],
+          workspaceEnvOverrides: {
+            "apps/server": byPath,
+            "@ruker/server-b": byName,
+          },
+        }),
+      );
+
+      expect(targets[1].overrides).toBe(byPath);
+      expect(targets[2].overrides).toBe(byName);
+    });
+
+    it("keeps basename keys working when the selection is unambiguous", () => {
+      const selected = { ONLY: "one" };
+      const targets = getEnvTargets(
+        contextFor(repoRoot, {
+          workspaces: ["apps/server"],
+          workspaceEnvOverrides: { server: selected },
+        }),
+      );
+
+      expect(targets[1].overrides).toBe(selected);
+    });
+  });
 });

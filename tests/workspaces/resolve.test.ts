@@ -158,6 +158,36 @@ describe("workspace resolution", () => {
     expect(resolveWorkspaces(tmpDir, ["server"])[0].dir).toBe("apps/server");
   });
 
+  it("rejects fallback selectors that escape the repository", () => {
+    const repoDir = path.join(tmpDir, "repo");
+    fs.mkdirSync(repoDir, { recursive: true });
+    writeJson(path.join(repoDir, "package.json"), { name: "root" });
+    // An external directory with a package.json that `../outside` would
+    // reach if traversal were accepted by the fallback probe.
+    writeJson(path.join(tmpDir, "outside/package.json"), { name: "outside" });
+
+    expect(() => resolveWorkspaces(repoDir, ["../outside"])).toThrow(
+      /Workspace "\.\.\/outside" not found/,
+    );
+    expect(() =>
+      resolveWorkspaces(repoDir, ["apps/../outside"]),
+    ).toThrow(/not found/);
+  });
+
+  it("normalizes fallback `dir` to a repo-relative POSIX path", () => {
+    const repoDir = path.join(tmpDir, "repo");
+    writeJson(path.join(repoDir, "package.json"), { name: "root" });
+    writeJson(path.join(repoDir, "apps/server/package.json"), {
+      name: "server",
+    });
+
+    // Selectors may arrive with ./ prefixes or normalization opportunities;
+    // the resolved dir must stay comparable with declared workspaces.
+    expect(resolveWorkspaces(repoDir, ["./apps/server"])[0].dir).toBe(
+      "apps/server",
+    );
+  });
+
   it("does not readdir node_modules while expanding globs", () => {
     writeJson(path.join(tmpDir, "package.json"), {
       name: "root",

@@ -1,7 +1,12 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
-import { buildContext, filterWorktrees, getEnvTargets } from "../context.js";
+import {
+  buildContext,
+  filterWorktrees,
+  getEnvTargets,
+  preflightEnvOptions,
+} from "../context.js";
 import type { EnvCliOptions } from "../context.js";
 import { allocateWorktreePorts, allocationEnv } from "../ports/allocate.js";
 import { composeProjectName } from "../utils/sanitize.js";
@@ -171,8 +176,12 @@ export async function startMcpServer(): Promise<void> {
       workspaces: z.array(z.string()).optional().describe("Monorepo workspaces (by package name, directory, or path) that also get env injected."),
     },
     async ({ indices, envFile, workspaces }) => {
+      // Validate env options first so a failed start after stopping can
+      // never leave the selected worktrees down instead of up.
+      const cli = { envFile, workspaces };
+      preflightEnvOptions(cli);
       stopWorktrees(indices ?? []);
-      const result = startWorktrees(indices ?? [], { envFile, workspaces });
+      const result = startWorktrees(indices ?? [], cli);
       return { content: [{ type: "text", text: result }] };
     },
   );

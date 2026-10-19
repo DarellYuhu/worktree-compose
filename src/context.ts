@@ -170,7 +170,11 @@ export function getEnvTargets(ctx: WtcContext): EnvTarget[] {
       dir: ws.dir,
       label: `workspace ${ws.name} (${ws.dir})`,
       envFileName,
-      overrides: findWorkspaceOverrides(ctx.config.workspaceEnvOverrides, ws),
+      overrides: findWorkspaceOverrides(
+        ctx.config.workspaceEnvOverrides,
+        ws,
+        workspaces,
+      ),
     });
   }
 
@@ -178,18 +182,37 @@ export function getEnvTargets(ctx: WtcContext): EnvTarget[] {
 }
 
 /**
+ * Validate env-related CLI options up front: build the context and resolve
+ * its env targets, which throws for invalid env file names, malformed
+ * config, and unknown workspace selectors. Restart paths call this before
+ * stopping any worktree, so bad options never leave things stopped.
+ */
+export function preflightEnvOptions(cli: EnvCliOptions = {}): void {
+  getEnvTargets(buildContext(cli));
+}
+
+/**
  * Look up a workspace's overrides by package name, then directory basename,
- * then repo-relative path.
+ * then repo-relative path — the key order resolveWorkspaces matches
+ * selectors in. A bare basename applies only when it identifies exactly one
+ * workspace, mirroring selector resolution's ambiguity rule: workspaces
+ * sharing a directory name must be reached by full path.
  */
 function findWorkspaceOverrides(
   map: Record<string, Record<string, string>> | undefined,
   ws: WorkspaceInfo,
+  workspaces: WorkspaceInfo[],
 ): Record<string, string> | undefined {
   if (!map) return undefined;
 
+  const basename = path.posix.basename(ws.dir);
+  const basenameUnique =
+    workspaces.filter((w) => path.posix.basename(w.dir) === basename)
+      .length === 1;
+
   for (const key of [
     ws.name,
-    path.posix.basename(ws.dir),
+    ...(basenameUnique ? [basename] : []),
     ws.dir,
     `./${ws.dir}`,
   ]) {
