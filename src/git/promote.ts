@@ -3,12 +3,30 @@ import path from "node:path";
 import { exec, execSafe } from "../utils/exec.js";
 
 const PROMOTE_EXCLUDES = new Set([
-  ".env",
   "docker-compose.yml",
   "docker-compose.yaml",
   "compose.yml",
   "compose.yaml",
 ]);
+
+/** Committed env templates; wtc never writes these, so they stay promotable. */
+const ENV_TEMPLATES = new Set([
+  ".env.example",
+  ".env.sample",
+  ".env.template",
+  ".env.dist",
+  ".env.defaults",
+]);
+
+/**
+ * Local env files are excluded from promote — wtc rewrites them with
+ * per-worktree ports: `.env`, `.env.development`, `.env.local`, …
+ */
+export function isEnvFile(file: string): boolean {
+  const base = path.posix.basename(file);
+  if (ENV_TEMPLATES.has(base)) return false;
+  return base === ".env" || base.startsWith(".env.");
+}
 
 function resolveRef(repoRoot: string, ref: string): string {
   return exec(`git -C "${repoRoot}" rev-parse "${ref}"`);
@@ -49,7 +67,9 @@ export function getChangedFiles(
     .filter(Boolean);
 
   const unique = [...new Set(allFiles)];
-  return unique.filter((f) => !PROMOTE_EXCLUDES.has(f));
+  return unique.filter(
+    (f) => !PROMOTE_EXCLUDES.has(f) && !isEnvFile(f),
+  );
 }
 
 export function getLocalDirtyFiles(repoRoot: string): string[] {
