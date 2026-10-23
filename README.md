@@ -343,7 +343,7 @@ npx wtc list
 
 ### `wtc promote <index>`
 
-Copy a worktree's changed files — added, modified, and deleted — into your current branch as uncommitted changes. Skips local env files (`.env`, `.env.development`, …) and compose files, and aborts if any file it would touch has uncommitted local changes.
+Copy a worktree's changed files — added, modified, and deleted — into your current branch as uncommitted changes. Skips local env files (`.env`, `.env.development`, …; committed templates like `.env.example` still promote) and compose files, and aborts if any file it would touch has uncommitted local changes.
 
 ```bash
 npx wtc promote 1

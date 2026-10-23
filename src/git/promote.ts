@@ -9,13 +9,22 @@ const PROMOTE_EXCLUDES = new Set([
   "compose.yaml",
 ]);
 
+/** Committed env templates; wtc never writes these, so they stay promotable. */
+const ENV_TEMPLATES = new Set([
+  ".env.example",
+  ".env.sample",
+  ".env.template",
+  ".env.dist",
+  ".env.defaults",
+]);
+
 /**
- * Local env files are excluded from promote (`.env.example` is committed and
- * therefore promotable): `.env`, `.env.development`, `.env.local`, …
+ * Local env files are excluded from promote — wtc rewrites them with
+ * per-worktree ports: `.env`, `.env.development`, `.env.local`, …
  */
-function isEnvFile(file: string): boolean {
+export function isEnvFile(file: string): boolean {
   const base = path.posix.basename(file);
-  if (base === ".env.example") return false;
+  if (ENV_TEMPLATES.has(base)) return false;
   return base === ".env" || base.startsWith(".env.");
 }
 
