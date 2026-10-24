@@ -1,0 +1,62 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://unpkg.com/worktree-compose/wtc.schema.json",
+  "title": "worktree-compose configuration",
+  "description": "Configuration for wtc (worktree-compose), read from .wtcrc.json or the \"wtc\" key of package.json in the main worktree.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "$schema": {
+      "type": "string",
+      "description": "JSON Schema reference for editor completion. Ignored by wtc."
+    },
+    "sync": {
+      "type": "array",
+      "description": "Extra repo-relative files or directories copied from the main worktree into each worktree on start. Entries that are absolute or escape the repository are skipped.",
+      "items": { "type": "string", "minLength": 1 },
+      "examples": [["nginx", "config/local.json"]]
+    },
+    "envFile": {
+      "type": "string",
+      "description": "Env filename copied from the main worktree and injected with ports (root and selected workspaces). Must be a bare filename.",
+      "default": ".env",
+      "pattern": "^[^/\\\\]+$",
+      "examples": [".env.development"]
+    },
+    "workspaces": {
+      "type": "array",
+      "description": "Monorepo workspaces (package name, directory name, or repo-relative path) that also receive env copies and port injection.",
+      "items": { "type": "string", "minLength": 1 }
+    },
+    "envOverrides": {
+      "type": "object",
+      "description": "Extra variables written to the root env file. Values interpolate ${VAR} with allocated port variables and ${COMPOSE_PROJECT_NAME}.",
+      "additionalProperties": { "type": "string" },
+      "examples": [{ "VITE_API_URL": "http://localhost:${BACKEND_PORT}" }]
+    },
+    "workspaceEnvOverrides": {
+      "type": "object",
+      "description": "Per-workspace variables, keyed by workspace package name, directory basename, or path. Same interpolation as envOverrides.",
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": { "type": "string" }
+      }
+    },
+    "portStride": {
+      "type": "integer",
+      "minimum": 1,
+      "default": 1,
+      "description": "Allocated port = 20000 + default port + worktree index × portStride. Raise it (e.g. 100) when default host ports are clustered."
+    },
+    "composeCommand": {
+      "description": "Which compose tool to use instead of auto-detection (docker compose → podman compose → docker-compose → podman-compose; the first whose daemon answers wins). Repository config may only choose one of these four, so a cloned repository cannot make wtc run an arbitrary program. For a custom command (an absolute path, global flags such as --context, nerdctl, …) set the WTC_COMPOSE_COMMAND environment variable, which takes precedence.",
+      "oneOf": [
+        { "type": "string", "enum": ["docker compose", "podman compose", "docker-compose", "podman-compose"] },
+        {
+          "type": "array",
+          "enum": [["docker", "compose"], ["podman", "compose"], ["docker-compose"], ["podman-compose"]]
+        }
+      ]
+    }
+  }
+}

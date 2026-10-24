@@ -78,19 +78,24 @@ export interface PortCollision {
 }
 
 /**
- * Detect cross-worktree port collisions for a given stride across worktree
- * indices 1..worktreeCount. Returns one entry per colliding allocation.
+ * Detect cross-worktree port collisions for a given stride. `worktrees` is
+ * either a count (indices 1..n) or the exact indices in use — persistent
+ * indices can have gaps (e.g. 2, 3, 7), and only the ones actually assigned
+ * can collide. Returns one entry per colliding allocation.
  */
 export function detectCrossWorktreeCollisions(
   mappings: PortMapping[],
   portStride: number,
-  worktreeCount: number,
+  worktrees: number | number[],
 ): PortCollision[] {
   const overridable = mappings.filter((m) => m.envVar !== null);
   const seen = new Map<number, PortCollisionParty>();
   const collisions: PortCollision[] = [];
+  const indices = Array.isArray(worktrees)
+    ? [...new Set(worktrees)].sort((a, b) => a - b)
+    : Array.from({ length: worktrees }, (_, i) => i + 1);
 
-  for (let w = 1; w <= worktreeCount; w++) {
+  for (const w of indices) {
     for (const m of overridable) {
       const port = allocatePort(m.defaultPort, w, portStride);
       const prev = seen.get(port);

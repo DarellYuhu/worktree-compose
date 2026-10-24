@@ -1,6 +1,6 @@
 {
   "name": "worktree-compose",
-  "version": "0.2.0",
+  "version": "1.0.0",
   "description": "Zero-config Docker Compose isolation for git worktrees",
   "type": "module",
   "bin": {
@@ -8,16 +8,18 @@
     "wtc": "./dist/cli.js"
   },
   "files": [
-    "dist"
+    "dist",
+    "SKILL.md",
+    "wtc.schema.json"
   ],
   "engines": {
-    "node": ">=18"
+    "node": ">=20"
   },
   "scripts": {
     "build": "tsc",
     "dev": "tsx src/cli.ts",
+    "typecheck": "tsc --noEmit",
     "test": "NODE_OPTIONS='--experimental-vm-modules' jest --coverage",
-    "release": "set -a && . ./.env && set +a && pnpm publish --no-git-checks",
     "prepublishOnly": "npm run build"
   },
   "keywords": [
@@ -28,7 +30,8 @@
     "isolation",
     "parallel",
     "development",
-    "mcp"
+    "mcp",
+    "podman"
   ],
   "repository": {
     "type": "git",
@@ -37,15 +40,15 @@
   "bugs": {
     "url": "https://github.com/mostafasudo/worktree-compose/issues"
   },
-  "homepage": "https://github.com/mostafasudo/worktree-compose#readme",
+  "homepage": "https://www.worktree-compose.com",
   "license": "MIT",
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.12.1",
+    "@modelcontextprotocol/sdk": "^1.26.0",
     "chalk": "^5.4.1",
     "cli-table3": "^0.6.5",
     "commander": "^14.0.0",
     "yaml": "^2.8.0",
-    "zod": "^3.24.4"
+    "zod": "^3.25.0"
   },
   "devDependencies": {
     "@types/jest": "^29.5.14",

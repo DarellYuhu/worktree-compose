@@ -1,21 +1,35 @@
 import path from "node:path";
-import { getRepoRoot, getRepoName, detectComposeFile } from "./compose/detect.js";
+import { detectComposeFile } from "./compose/detect.js";
 import { parseComposeFile } from "./compose/parse.js";
-import { extractPortMappings } from "./ports/extract.js";
+import { resolveEngine } from "./compose/engine.js";
+import { createStackProbe } from "./compose/status.js";
 import {
-  detectCrossWorktreeCollisions,
-  recommendPortStride,
-} from "./ports/allocate.js";
-import type { PortCollision } from "./ports/allocate.js";
+  composeIsolationWarnings,
+  portCollisionWarnings,
+  rawPortWarnings,
+} from "./compose/isolation.js";
+import { extractPortMappings } from "./ports/extract.js";
 import { loadConfig } from "./config.js";
-import { getNonMainWorktrees } from "./git/worktree.js";
+import { assertMainCheckout, getRepoInfo, listRepoWorktrees } from "./git/repo.js";
+import { isCandidate, samePath } from "./git/worktree.js";
+import { hasRecord, peekState, reconcileWorktrees } from "./state/registry.js";
+import { escapeRegExp, sanitize } from "./utils/sanitize.js";
 import { resolveWorkspaces } from "./workspaces/resolve.js";
+import { resolveSyncEntries } from "./sync/files.js";
 import { DEFAULT_ENV_FILE } from "./sync/env.js";
-import * as log from "./utils/log.js";
+import type { ComposeEngine } from "./compose/engine.js";
+import type { PsContainer, StackProbe } from "./compose/status.js";
 import type { ComposeFile } from "./compose/types.js";
 import type { PortMapping } from "./ports/types.js";
 import type { WtcConfig } from "./config.js";
+import type { RepoInfo } from "./git/repo.js";
 import type { WorktreeInfo } from "./git/worktree.js";
+import type {
+  AdoptableStack,
+  ResolvedWorktree,
+  UnavailableRecord,
+  WorktreeRecord,
+} from "./state/registry.js";
 import type { EnvTarget } from "./sync/env.js";
 import type { WorkspaceInfo } from "./workspaces/resolve.js";
 
@@ -27,28 +41,165 @@ export interface EnvCliOptions {
   workspaces?: string[];
 }
 
+export interface BuildContextOptions {
+  /** Directory wtc runs from (defaults to `process.cwd()`). */
+  cwd?: string;
+  /**
+   * Resolve the compose engine and probe stack states (status display). A
+   * worktree seen for the first time may then adopt the identity of a
+   * stack already running from it, and an empty registry is persisted —
+   * without a probe it is only computed (see ReconcileOptions.adoptable).
+   */
+  probeStacks?: boolean;
+  /**
+   * Compute identities without side effects (`--dry-run`): never write the
+   * registry, create worktree ids, or move a corrupt registry aside.
+   */
+  readOnly?: boolean;
+  /** Tolerate a main checkout without a compose file (promote, clean). */
+  allowMissingCompose?: boolean;
+  /**
+   * The command syncs files into, starts, or removes other checkouts: refuse
+   * (naming this action) when the main checkout cannot be located, instead
+   * of treating the current checkout as the main one.
+   */
+  requireMainFor?: string;
+}
+
 export interface WtcContext {
+  repo: RepoInfo;
+  /** The MAIN worktree — source of compose, config and env files. */
   repoRoot: string;
   repoName: string;
+  cwd: string;
   composeFile: ComposeFile;
+  /** False only with `allowMissingCompose` when no compose file exists. */
+  hasComposeFile: boolean;
   portMappings: PortMapping[];
   config: WtcConfig;
   portStride: number;
-  worktrees: WorktreeInfo[];
+  /** Live linked worktrees with their persistent index/project, in git order. */
+  worktrees: ResolvedWorktree[];
+  /** Registry records whose worktree is gone (stack may still exist). */
+  orphans: WorktreeRecord[];
+  /**
+   * Records of worktrees git still lists but wtc cannot start (locked and
+   * missing on disk, or now the main checkout): their stacks are left alone.
+   */
+  unavailable: UnavailableRecord[];
+  /** Worktrees git still lists but whose directory is missing. */
+  prunable: WorktreeInfo[];
+  /** General warnings (missing worktrees, registry problems, skipped sync entries). */
+  warnings: string[];
+  /** Settings that break isolation between worktree stacks. */
+  isolationWarnings: string[];
+  /** Stack states (only with `probeStacks`). */
+  stacks: StackProbe | null;
+  /** Resolve the compose engine (lazily; throws when none is available). */
+  getEngine(): ComposeEngine;
 }
 
-export function buildContext(cli: EnvCliOptions = {}): WtcContext {
-  const repoRoot = getRepoRoot();
-  const repoName = getRepoName(repoRoot);
+function emptyComposeFile(composePath: string): ComposeFile {
+  return {
+    services: [],
+    composePath,
+    sourceFiles: [],
+    sharedVolumes: [],
+    sharedNetworks: [],
+  };
+}
+
+/** Characters compose allows in a project name. */
+const COMPOSE_PROJECT_NAME = /^[a-z0-9][a-z0-9_-]*$/;
+
+/**
+ * Identities of running stacks that worktrees may adopt, keyed by worktree
+ * path: compose projects named like this repository's worktree stacks
+ * (`<repo>-wt-<n>-…`) whose `working_dir` label is one of `worktrees`.
+ * Compose records the directory it ran in, so a registry that was lost,
+ * corrupted, or never written (0.2) is rebuilt from the stacks themselves
+ * instead of renumbering them. One-off `compose run` containers are
+ * ignored; when several projects ran from one worktree, the one with the
+ * most running (then total) containers, then the lowest index, wins.
+ */
+export function adoptableStacks(
+  containers: PsContainer[],
+  repoName: string,
+  worktrees: WorktreeInfo[],
+): Map<string, AdoptableStack> {
+  const prefix = sanitize(repoName);
+  const pattern = new RegExp(`^${prefix ? `${escapeRegExp(prefix)}-` : ""}wt-(\\d+)-`);
+  const stacks = new Map<string, AdoptableStack & { path: string; running: number; total: number }>();
+  for (const c of containers) {
+    if (!c.project || !c.workingDir || c.oneoff) continue;
+    // Only a name compose accepts may become a record's project: a label
+    // that could not be parsed cleanly must never be persisted.
+    if (!COMPOSE_PROJECT_NAME.test(c.project)) continue;
+    const m = pattern.exec(c.project);
+    if (!m) continue;
+    const wt = worktrees.find((w) => samePath(w.path, c.workingDir!));
+    if (!wt) continue;
+    const stack = stacks.get(c.project) ?? {
+      index: Number(m[1]),
+      project: c.project,
+      path: path.resolve(wt.path),
+      running: 0,
+      total: 0,
+    };
+    stack.total++;
+    if (c.running) stack.running++;
+    stacks.set(c.project, stack);
+  }
+
+  const best = new Map<string, AdoptableStack>();
+  const ranked = [...stacks.values()].sort(
+    (a, b) => b.running - a.running || b.total - a.total || a.index - b.index,
+  );
+  for (const s of ranked) {
+    if (s.index > 0 && !best.has(s.path)) best.set(s.path, { index: s.index, project: s.project });
+  }
+  return best;
+}
+
+/**
+ * What worktrees seen for the first time may adopt — computed before the
+ * registry lock is taken: a slow engine must never hold the lock other wtc
+ * processes wait on. `undefined` when the engine is unavailable (no probe).
+ */
+function stacksToAdopt(
+  stacks: StackProbe,
+  repo: RepoInfo,
+  listWorktrees: () => WorktreeInfo[],
+): Map<string, AdoptableStack> | undefined {
+  const recorded = peekState(repo.commonDir);
+  const unrecorded = listWorktrees().filter((wt) => isCandidate(wt) && !hasRecord(recorded, wt));
+  // Every live worktree has a record: nothing to adopt, no `ps` needed.
+  if (unrecorded.length === 0) return new Map();
+  if (stacks.problem !== null) return undefined;
+  const containers = stacks.containers();
+  // Unparseable `ps` (per-project fallback): the engine answers, but no labels to adopt from.
+  return containers ? adoptableStacks(containers, repo.repoName, unrecorded) : new Map();
+}
+
+export function buildContext(
+  cli: EnvCliOptions = {},
+  opts: BuildContextOptions = {},
+): WtcContext {
+  const cwd = path.resolve(opts.cwd ?? process.cwd());
+  const repo = getRepoInfo(cwd);
+  if (opts.requireMainFor) assertMainCheckout(repo, opts.requireMainFor);
+  const repoRoot = repo.mainRoot;
+  const warnings: string[] = [...repo.warnings];
 
   const composePath = detectComposeFile(repoRoot);
-  if (!composePath) {
+  if (!composePath && !opts.allowMissingCompose) {
     throw new Error(
       `No compose file found in ${repoRoot}. Expected one of: compose.yaml, compose.yml, docker-compose.yaml, docker-compose.yml`,
     );
   }
-
-  const composeFile = parseComposeFile(composePath);
+  const composeFile = composePath
+    ? parseComposeFile(composePath)
+    : emptyComposeFile(path.join(repoRoot, "compose.yaml"));
   const portMappings = extractPortMappings(composeFile.services);
   const config = resolveConfig(loadConfig(repoRoot), cli);
   const portStride = config.portStride ?? 1;
@@ -57,23 +208,92 @@ export function buildContext(cli: EnvCliOptions = {}): WtcContext {
       `Invalid "portStride": ${String(portStride)}. Expected a positive integer.`,
     );
   }
-  const worktrees = getNonMainWorktrees(repoRoot);
+  warnings.push(...resolveSyncEntries(repoRoot, config.sync).warnings);
 
-  warnOnPortCollisions(portMappings, portStride, worktrees.length);
+  let engine: ComposeEngine | null = null;
+  const getEngine = (): ComposeEngine => {
+    engine ??= resolveEngine(config);
+    return engine;
+  };
+
+  let stacks: StackProbe | null = null;
+  if (opts.probeStacks) {
+    let problem: string | null = null;
+    try {
+      getEngine();
+    } catch (err) {
+      problem = err instanceof Error ? err.message : String(err);
+    }
+    stacks = createStackProbe(engine, problem, repoRoot);
+  }
+
+  const listWorktrees = () => listRepoWorktrees(repo);
+  const reconciled = reconcileWorktrees({
+    commonDir: repo.commonDir,
+    repoName: repo.repoName,
+    listWorktrees,
+    adoptable: stacks ? stacksToAdopt(stacks, repo, listWorktrees) : undefined,
+    // Without the main checkout identities are only computed: a stand-in
+    // main (and the repo name derived from it) must never be persisted.
+    readOnly: opts.readOnly || repo.mainRootIsFallback,
+    mainCheckout: repo.recordMain ? repo.mainRoot : undefined,
+  });
+  warnings.push(...reconciled.warnings);
+
+  const all = reconciled.listed;
+  const prunable = all.filter((wt) => !wt.isMain && wt.prunable);
+  for (const wt of prunable) {
+    warnings.push(
+      `Worktree ${wt.path} is missing on disk — run 'git worktree prune'.`,
+    );
+  }
+  for (const wt of all.filter((w) => !w.isMain && w.missing)) {
+    const held = reconciled.unavailable.find((u) => u.reason === "missing" && samePath(u.path, wt.path));
+    warnings.push(
+      `Worktree ${wt.path} is locked but missing on disk (unmounted drive?) — skipped` +
+        (held ? `; its index ${held.index} and stack ${held.project} are kept until it is back.` : "."),
+    );
+  }
+  for (const u of reconciled.unavailable.filter((r) => r.reason === "main")) {
+    warnings.push(
+      `The main checkout ${u.path} was worktree ${u.index} (${u.project}) before it became the main checkout; ` +
+        `wtc leaves that stack alone (stop or remove it yourself if you no longer need it).`,
+    );
+  }
+
+  const isolationWarnings = [
+    ...rawPortWarnings(portMappings),
+    ...composeIsolationWarnings(composeFile),
+    ...portCollisionWarnings(portMappings, portStride, [
+      ...reconciled.worktrees.map((w) => w.index),
+      ...reconciled.orphans.map((o) => o.index),
+      ...reconciled.unavailable.map((u) => u.index),
+    ]),
+  ];
 
   return {
+    repo,
     repoRoot,
-    repoName,
+    repoName: repo.repoName,
+    cwd,
     composeFile,
+    hasComposeFile: composePath !== null,
     portMappings,
     config,
     portStride,
-    worktrees,
+    worktrees: reconciled.worktrees,
+    orphans: reconciled.orphans,
+    unavailable: reconciled.unavailable,
+    prunable,
+    warnings,
+    isolationWarnings,
+    stacks,
+    getEngine,
   };
 }
 
-/** Merge CLI overrides over the loaded config and validate the env settings. */
-function resolveConfig(config: WtcConfig, cli: EnvCliOptions): WtcConfig {
+/** Merge CLI overrides over the loaded config and validate it. */
+export function resolveConfig(config: WtcConfig, cli: EnvCliOptions): WtcConfig {
   const envFile = cli.envFile ?? config.envFile ?? DEFAULT_ENV_FILE;
   validateEnvFileName(envFile);
 
@@ -87,6 +307,31 @@ function resolveConfig(config: WtcConfig, cli: EnvCliOptions): WtcConfig {
   ) {
     throw new Error(
       `Invalid "workspaces" config: expected an array of workspace names.`,
+    );
+  }
+
+  if (
+    config.sync !== undefined &&
+    (!Array.isArray(config.sync) ||
+      config.sync.some((s) => typeof s !== "string" || s.trim() === ""))
+  ) {
+    throw new Error(
+      `Invalid "sync" config: expected an array of repo-relative paths.`,
+    );
+  }
+
+  const cmd = config.composeCommand;
+  if (
+    cmd !== undefined &&
+    !(typeof cmd === "string" && cmd.trim() !== "") &&
+    !(
+      Array.isArray(cmd) &&
+      cmd.length > 0 &&
+      cmd.every((c) => typeof c === "string" && c.trim() !== "")
+    )
+  ) {
+    throw new Error(
+      `Invalid "composeCommand" config: expected a command string such as "podman compose" or an array such as ["docker-compose"].`,
     );
   }
 
@@ -187,8 +432,12 @@ export function getEnvTargets(ctx: WtcContext): EnvTarget[] {
  * config, and unknown workspace selectors. Restart paths call this before
  * stopping any worktree, so bad options never leave things stopped.
  */
-export function preflightEnvOptions(cli: EnvCliOptions = {}): void {
-  getEnvTargets(buildContext(cli));
+export function preflightEnvOptions(
+  cli: EnvCliOptions = {},
+  cwd?: string,
+  opts: { requireMainFor?: string } = {},
+): void {
+  getEnvTargets(buildContext(cli, { cwd, readOnly: true, requireMainFor: opts.requireMainFor }));
 }
 
 /**
@@ -221,57 +470,4 @@ function findWorkspaceOverrides(
   }
 
   return undefined;
-}
-
-function warnOnPortCollisions(
-  portMappings: PortMapping[],
-  portStride: number,
-  worktreeCount: number,
-): void {
-  if (worktreeCount < 2) return;
-
-  // Collision detection is advisory; an allocation failure here must never
-  // abort the command that triggered the warning.
-  let collisions: PortCollision[];
-  try {
-    collisions = detectCrossWorktreeCollisions(
-      portMappings,
-      portStride,
-      worktreeCount,
-    );
-  } catch {
-    return;
-  }
-  if (collisions.length === 0) return;
-
-  const examples = collisions
-    .slice(0, 3)
-    .map(
-      (c) =>
-        `${c.port} (wt${c.a.worktreeIndex}/${c.a.serviceName} ↔ wt${c.b.worktreeIndex}/${c.b.serviceName})`,
-    )
-    .join(", ");
-  const recommended = recommendPortStride(portMappings, worktreeCount);
-  const fix =
-    recommended > 0
-      ? `Set "portStride": ${recommended} in .wtcrc.json (or package.json#wtc) to resolve.`
-      : `No single portStride resolves this — check for services sharing the same default port.`;
-
-  log.warn(
-    `Cross-worktree port collisions detected with portStride=${portStride} ` +
-      `across ${worktreeCount} worktrees: ${collisions.length} collision(s), e.g. ${examples}. ${fix}`,
-  );
-}
-
-export function filterWorktrees(
-  worktrees: WorktreeInfo[],
-  indices: number[],
-): WorktreeInfo[] {
-  if (indices.length === 0) return worktrees;
-  return indices
-    .map((i) => {
-      const wt = worktrees[i - 1];
-      if (!wt) throw new Error(`Worktree index ${i} not found. Run 'wtc list' to see available worktrees.`);
-      return wt;
-    });
 }

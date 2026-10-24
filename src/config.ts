@@ -2,6 +2,9 @@ import fs from "node:fs";
 import path from "node:path";
 
 export interface WtcConfig {
+  /** JSON Schema reference for editor completion; ignored by wtc. */
+  $schema?: string;
+  /** Extra repo-relative files/directories copied from the main checkout on start. */
   sync?: string[];
   envOverrides?: Record<string, string>;
   /**
@@ -27,21 +30,52 @@ export interface WtcConfig {
    * ports so that adjacent worktrees do not collide across services.
    */
   portStride?: number;
+  /**
+   * Compose command to run instead of auto-detection, e.g. `"podman compose"`
+   * or `["docker-compose"]`. `WTC_COMPOSE_COMMAND` takes precedence.
+   */
+  composeCommand?: string | string[];
 }
 
-export function loadConfig(repoRoot: string): WtcConfig {
+function readJsonFile(file: string): unknown {
+  const raw = fs.readFileSync(file, "utf-8");
+  try {
+    return JSON.parse(raw);
+  } catch (err) {
+    throw new Error(
+      `Invalid JSON in ${file}: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+}
+
+export interface LoadedConfig {
+  config: WtcConfig;
+  /** File the config came from, or `null` for the zero-config default. */
+  source: string | null;
+}
+
+/** Load `.wtcrc.json`, else `package.json#wtc`, recording which file was used. */
+export function loadConfigWithSource(repoRoot: string): LoadedConfig {
   const rcPath = path.join(repoRoot, ".wtcrc.json");
   if (fs.existsSync(rcPath)) {
-    return JSON.parse(fs.readFileSync(rcPath, "utf-8")) as WtcConfig;
+    const doc = readJsonFile(rcPath);
+    if (!doc || typeof doc !== "object" || Array.isArray(doc)) {
+      throw new Error(`Invalid config in ${rcPath}: expected a JSON object.`);
+    }
+    return { config: doc as WtcConfig, source: rcPath };
   }
 
   const pkgPath = path.join(repoRoot, "package.json");
   if (fs.existsSync(pkgPath)) {
-    const pkg = JSON.parse(fs.readFileSync(pkgPath, "utf-8"));
-    if (pkg.wtc && typeof pkg.wtc === "object") {
-      return pkg.wtc as WtcConfig;
+    const pkg = readJsonFile(pkgPath) as Record<string, unknown> | null;
+    if (pkg && typeof pkg.wtc === "object" && pkg.wtc !== null && !Array.isArray(pkg.wtc)) {
+      return { config: pkg.wtc as WtcConfig, source: `${pkgPath}#wtc` };
     }
   }
 
-  return {};
+  return { config: {}, source: null };
+}
+
+export function loadConfig(repoRoot: string): WtcConfig {
+  return loadConfigWithSource(repoRoot).config;
 }

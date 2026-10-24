@@ -1,33 +1,46 @@
 import Table from "cli-table3";
 import chalk from "chalk";
-import { buildContext } from "../context.js";
-import { allocateWorktreePorts } from "../ports/allocate.js";
-import { composeProjectName } from "../utils/sanitize.js";
-import { execSafe } from "../utils/exec.js";
-import { warn } from "../utils/log.js";
-import { suggestEnvVar } from "../ports/extract.js";
+import { listWorktrees } from "../core/list.js";
+import type { ListRow } from "../core/list.js";
+import { print, warn } from "../utils/log.js";
 
-function isWorktreeUp(projectName: string, wtPath: string): boolean {
-  const result = execSafe(
-    `docker compose -p "${projectName}" ps --format json`,
-    { cwd: wtPath },
-  );
-  return result !== null && result.length > 2;
+function renderStatus(row: ListRow): string {
+  switch (row.status) {
+    case "up":
+      return chalk.green("up");
+    case "partial":
+      return chalk.yellow(`partial ${row.running}/${row.total}`);
+    case "exited":
+      return chalk.yellow("exited");
+    case "down":
+      return chalk.red("down");
+    default:
+      return chalk.dim("?");
+  }
 }
 
-export function listCommand(): void {
-  const ctx = buildContext();
+export async function listCommand(
+  options: { json?: boolean; quiet?: boolean } = {},
+): Promise<void> {
+  const result = listWorktrees({ live: true });
 
-  const rawPorts = ctx.portMappings.filter((m) => m.envVar === null);
-  for (const p of rawPorts) {
+  if (options.json) {
+    // Keep stdout machine-readable: warnings go to stderr.
+    for (const w of result.warnings) console.error(`⚠ ${w}`);
+    console.log(JSON.stringify(result.rows, null, 2));
+    return;
+  }
+
+  // After start/restart (`quiet`), the warnings were already printed.
+  for (const w of options.quiet ? [] : result.warnings) warn(w);
+  if (!options.quiet && result.isolationWarnings.length > 0) {
     warn(
-      `Service "${p.serviceName}" uses a raw port mapping (${p.raw}). ` +
-        `To enable port isolation, change it to: "\${${suggestEnvVar(p.serviceName)}:-${p.defaultPort}}:${p.containerPort}"`,
+      `${result.isolationWarnings.length} isolation warning(s) — run 'wtc doctor'`,
     );
   }
 
-  if (ctx.worktrees.length === 0) {
-    console.log(
+  if (result.rows.length === 0) {
+    print(
       "\nNo extra worktrees found. Create one with:\n  git worktree add ../my-branch my-branch\n",
     );
     return;
@@ -43,55 +56,57 @@ export function listCommand(): void {
     ],
   });
 
-  const overridable = ctx.portMappings.filter((m) => m.envVar !== null);
-  const defaultPorts = overridable
-    .map((m) => `${m.serviceName}:${m.defaultPort}`)
-    .join(" ");
-
   table.push([
     chalk.dim("-"),
     chalk.dim("main"),
     chalk.dim("-"),
     chalk.dim("-"),
-    chalk.dim(defaultPorts),
+    chalk.dim(result.mainPorts.map((p) => `${p.service}:${p.port}`).join(" ")),
   ]);
 
-  for (let i = 0; i < ctx.worktrees.length; i++) {
-    const wt = ctx.worktrees[i];
-    const idx = i + 1;
-    const project = composeProjectName(ctx.repoName, idx, wt.branch);
-    const allocations = allocateWorktreePorts(
-      ctx.portMappings,
-      idx,
-      ctx.portStride,
-    );
-    const up = isWorktreeUp(project, wt.path);
-
-    const ports = allocations
-      .map((a) => `${a.serviceName}:${a.port}`)
+  for (const row of result.rows) {
+    const ports = Object.entries(row.ports)
+      .map(([envVar, port]) => `${envVar}=${port}`)
       .join(" ");
-
-    const frontendAlloc = allocations.find(
-      (a) =>
-        a.serviceName.includes("frontend") ||
-        a.serviceName.includes("web") ||
-        a.serviceName.includes("app") ||
-        a.serviceName.includes("ui"),
-    );
-    const url = frontendAlloc
-      ? `http://localhost:${frontendAlloc.port}`
-      : allocations.length > 0
-        ? `http://localhost:${allocations[allocations.length - 1].port}`
-        : "-";
-
+    if (row.orphan || row.unavailable) {
+      const note = row.orphan
+        ? "removed"
+        : row.unavailable === "missing"
+          ? "locked, missing on disk"
+          : "now the main checkout";
+      table.push([
+        chalk.dim(String(row.index)),
+        chalk.dim(`${row.branch} (${note})`),
+        renderStatus(row),
+        chalk.dim("-"),
+        chalk.dim(ports),
+      ]);
+      continue;
+    }
+    const url = row.url ?? "-";
     table.push([
-      String(idx),
-      wt.branch,
-      up ? chalk.green("up") : chalk.red("down"),
-      up ? chalk.underline(url) : chalk.dim(url),
+      String(row.index),
+      row.branch,
+      renderStatus(row),
+      row.status === "up" || row.status === "partial" ? chalk.underline(url) : chalk.dim(url),
       ports,
     ]);
   }
 
-  console.log(table.toString());
+  print(table.toString());
+
+  if (result.rows.some((r) => r.orphan)) {
+    print(
+      chalk.dim(
+        "(removed) = the worktree is gone but its stack/record remains. Run 'wtc prune' to tear it down.",
+      ),
+    );
+  }
+  if (result.rows.some((r) => r.unavailable === "missing")) {
+    print(
+      chalk.dim(
+        "(locked, missing on disk) = remount it (e.g. an unmounted drive) to use it; wtc keeps its stack and index meanwhile.",
+      ),
+    );
+  }
 }

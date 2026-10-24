@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { parse as parseYaml } from "yaml";
-import type { ComposeFile, ComposeService } from "./types.js";
+import type { ComposeFile, ComposeService, SharedResource } from "./types.js";
 
 function parseServicePorts(ports: unknown): string[] {
   if (!Array.isArray(ports)) return [];
@@ -31,6 +31,7 @@ function parseServiceBuild(
       context: typeof obj.context === "string" ? obj.context : undefined,
       dockerfile:
         typeof obj.dockerfile === "string" ? obj.dockerfile : undefined,
+      ...(typeof obj.dockerfile_inline === "string" ? { inline: true } : {}),
     };
   }
   return undefined;
@@ -64,9 +65,88 @@ function parseServicesObject(
       ports: parseServicePorts(s.ports),
       build: parseServiceBuild(s.build),
       envFile: parseEnvFile(s.env_file),
+      ...(typeof s.container_name === "string" && s.container_name
+        ? { containerName: s.container_name }
+        : {}),
       sourcePath,
     };
   });
+}
+
+interface ResourceDef {
+  name?: string;
+  external: boolean;
+}
+
+/**
+ * Top-level `volumes:` / `networks:` entries. Only `name:` and `external`
+ * matter to wtc: either one takes the resource out of the project scope, so
+ * every worktree stack would share it.
+ */
+function parseResources(section: unknown): Map<string, ResourceDef> {
+  const out = new Map<string, ResourceDef>();
+  if (!section || typeof section !== "object" || Array.isArray(section)) {
+    return out;
+  }
+  for (const [key, raw] of Object.entries(section as Record<string, unknown>)) {
+    const def = raw && typeof raw === "object" ? (raw as Record<string, unknown>) : {};
+    // `external: true`, or the legacy `external: { name: x }` form.
+    const external =
+      def.external === true ||
+      (typeof def.external === "object" && def.external !== null);
+    const legacyName =
+      typeof def.external === "object" && def.external !== null
+        ? (def.external as Record<string, unknown>).name
+        : undefined;
+    const name =
+      typeof def.name === "string" && def.name
+        ? def.name
+        : typeof legacyName === "string" && legacyName
+          ? legacyName
+          : undefined;
+    out.set(key, { ...(name ? { name } : {}), external });
+  }
+  return out;
+}
+
+/** Later definitions override earlier ones field by field, like services. */
+function mergeResources(
+  into: Map<string, ResourceDef>,
+  from: Map<string, ResourceDef>,
+): void {
+  for (const [key, def] of from) {
+    const existing = into.get(key);
+    into.set(
+      key,
+      existing
+        ? { name: def.name ?? existing.name, external: def.external || existing.external }
+        : def,
+    );
+  }
+}
+
+/**
+ * A name built from `${COMPOSE_PROJECT_NAME}` is still per-stack: wtc sets
+ * that variable for every worktree (process env and root env file).
+ */
+export function isProjectScopedName(name: string): boolean {
+  return /\$\{?COMPOSE_PROJECT_NAME\b/.test(name);
+}
+
+function sharedOnly(defs: Map<string, ResourceDef>): SharedResource[] {
+  const out: SharedResource[] = [];
+  for (const [key, def] of defs) {
+    if (!def.external && (!def.name || isProjectScopedName(def.name))) continue;
+    out.push({ key, ...(def.name ? { name: def.name } : {}), external: def.external });
+  }
+  return out;
+}
+
+interface ParseState {
+  seen: Set<string>;
+  sourceFiles: string[];
+  volumes: Map<string, ResourceDef>;
+  networks: Map<string, ResourceDef>;
 }
 
 /**
@@ -127,6 +207,9 @@ function mergeService(
     ports,
     build: override.build ?? base.build,
     envFile: override.envFile ?? base.envFile,
+    ...((override.containerName ?? base.containerName)
+      ? { containerName: override.containerName ?? base.containerName }
+      : {}),
     sourcePath,
   };
 }
@@ -147,11 +230,7 @@ function foldServices(services: ComposeService[]): ComposeService[] {
   return [...byName.values()];
 }
 
-function parseRecursive(
-  filePath: string,
-  seen: Set<string>,
-  sourceFiles: string[],
-): ComposeService[] {
+function parseRecursive(filePath: string, st: ParseState): ComposeService[] {
   if (!fs.existsSync(filePath)) {
     console.warn(`wtc: included compose file not found, skipping: ${filePath}`);
     return [];
@@ -159,14 +238,21 @@ function parseRecursive(
 
   // Key on the realpath so symlinked duplicates and cycles are caught.
   const key = fs.realpathSync.native(filePath);
-  if (seen.has(key)) return [];
-  seen.add(key);
+  if (st.seen.has(key)) return [];
+  st.seen.add(key);
 
   const raw = fs.readFileSync(filePath, "utf-8");
-  const doc = parseYaml(raw, { uniqueKeys: false });
+  let doc: unknown;
+  try {
+    doc = parseYaml(raw, { uniqueKeys: false });
+  } catch (err) {
+    throw new Error(
+      `Invalid YAML in ${filePath}: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
   if (!doc || typeof doc !== "object") return [];
 
-  sourceFiles.push(key);
+  st.sourceFiles.push(key);
 
   // Recurse into includes first so local services can override included ones.
   let included: ComposeService[] = [];
@@ -175,18 +261,32 @@ function parseRecursive(
       (doc as Record<string, unknown>).include,
       filePath,
     )) {
-      included = included.concat(parseRecursive(inc, seen, sourceFiles));
+      included = included.concat(parseRecursive(inc, st));
     }
   }
 
-  const local = parseServicesObject(doc as Record<string, unknown>, key);
+  const record = doc as Record<string, unknown>;
+  mergeResources(st.volumes, parseResources(record.volumes));
+  mergeResources(st.networks, parseResources(record.networks));
+
+  const local = parseServicesObject(record, key);
   return foldServices([...included, ...local]);
 }
 
 export function parseComposeFile(composePath: string): ComposeFile {
   const abs = path.resolve(composePath);
-  const seen = new Set<string>();
-  const sourceFiles: string[] = [];
-  const services = parseRecursive(abs, seen, sourceFiles);
-  return { services, composePath: abs, sourceFiles };
+  const st: ParseState = {
+    seen: new Set<string>(),
+    sourceFiles: [],
+    volumes: new Map(),
+    networks: new Map(),
+  };
+  const services = parseRecursive(abs, st);
+  return {
+    services,
+    composePath: abs,
+    sourceFiles: st.sourceFiles,
+    sharedVolumes: sharedOnly(st.volumes),
+    sharedNetworks: sharedOnly(st.networks),
+  };
 }

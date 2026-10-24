@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import { isSameFile, prepareWritablePath } from "../utils/paths.js";
 import type { PortAllocation } from "../ports/types.js";
 
 export const DEFAULT_ENV_FILE = ".env";
@@ -33,37 +34,65 @@ export function stripOverrideBlock(content: string): string {
   return [before, after].filter(Boolean).join("\n") + "\n";
 }
 
-/** Interpolate `${VAR}` placeholders with allocated port values. */
+/** Name of the compose project variable wtc writes into the root env file. */
+export const PROJECT_NAME_VAR = "COMPOSE_PROJECT_NAME";
+
+/** Interpolate `${VAR}` placeholders with allocated port values (and the project name). */
 export function resolveOverrideValue(
   value: string,
-  portValues: Map<string, number>,
+  values: Map<string, number | string>,
 ): string {
   let result = value;
-  for (const [envVar, port] of portValues) {
-    result = result.replaceAll(`\${${envVar}}`, String(port));
+  for (const [name, replacement] of values) {
+    result = result.replaceAll(`\${${name}}`, String(replacement));
   }
   return result;
 }
 
+export interface InjectOptions {
+  /** Compose project name; always available to overrides as `${COMPOSE_PROJECT_NAME}`. */
+  projectName?: string;
+  /**
+   * Also write `COMPOSE_PROJECT_NAME=<project>` (root target only), so running
+   * `docker compose` by hand inside the worktree addresses the same stack wtc
+   * started instead of creating a new one named after the directory.
+   */
+  writeProjectName?: boolean;
+  /**
+   * Directory the env file must stay inside (the worktree root). Defaults to
+   * the file's own directory, which still protects the final component.
+   */
+  root?: string;
+  /** The pristine env source this file was copied from; never written, even via a hard link. */
+  source?: string;
+}
+
 /**
- * All keys that should be written for a target: allocated ports plus the
- * target's overrides (already interpolated). Overrides win on key conflicts.
+ * All keys that should be written for a target: the project name (root
+ * target), allocated ports, then the target's overrides (already
+ * interpolated). Overrides win on key conflicts.
  */
 export function buildOverrideEntries(
   allocations: PortAllocation[],
   overrides?: Record<string, string>,
+  opts: InjectOptions = {},
 ): Record<string, string> {
   const entries: Record<string, string> = {};
-  const portValues = new Map<string, number>();
+  const values = new Map<string, number | string>();
+
+  if (opts.projectName !== undefined) {
+    if (opts.writeProjectName) entries[PROJECT_NAME_VAR] = opts.projectName;
+    values.set(PROJECT_NAME_VAR, opts.projectName);
+  }
 
   for (const a of allocations) {
     entries[a.envVar] = String(a.port);
-    portValues.set(a.envVar, a.port);
+    values.set(a.envVar, a.port);
   }
 
   if (overrides) {
     for (const [key, template] of Object.entries(overrides)) {
-      entries[key] = resolveOverrideValue(template, portValues);
+      entries[key] = resolveOverrideValue(template, values);
     }
   }
 
@@ -112,6 +141,8 @@ export interface InjectionResult {
   rewritten: string[];
   /** Keys that were not present and were appended in the override block. */
   appended: string[];
+  /** A symlink or special file at the path was replaced instead of written through. */
+  warnings: string[];
 }
 
 /**
@@ -123,15 +154,26 @@ export function injectPortOverrides(
   envPath: string,
   allocations: PortAllocation[],
   overrides?: Record<string, string>,
+  opts: InjectOptions = {},
 ): InjectionResult {
+  // Reading and writing follow symlinks: never inject through one (it could
+  // point at the main checkout's real .env, or anywhere else on disk). A
+  // symlink here is replaced; a directory resolving outside the root refused.
+  const root = opts.root ?? path.dirname(envPath);
+  const warnings: string[] = [];
+  const dest = prepareWritablePath(root, path.relative(root, envPath), warnings);
+  if (!dest) throw new Error(`Refusing to write ${envPath}: ${warnings.join(" ")}`);
+  if (opts.source && isSameFile(opts.source, dest)) {
+    throw new Error(`Refusing to write ${envPath}: it is the env source file ${opts.source} itself.`);
+  }
   let content = "";
-  if (fs.existsSync(envPath)) {
-    content = fs.readFileSync(envPath, "utf-8");
+  if (fs.existsSync(dest)) {
+    content = fs.readFileSync(dest, "utf-8");
   }
 
   content = stripOverrideBlock(content);
 
-  const entries = buildOverrideEntries(allocations, overrides);
+  const entries = buildOverrideEntries(allocations, overrides, opts);
   const rewritten: string[] = [];
   const appended: Record<string, string> = {};
 
@@ -152,10 +194,10 @@ export function injectPortOverrides(
     result += "\n";
   }
 
-  fs.mkdirSync(path.dirname(envPath), { recursive: true });
-  fs.writeFileSync(envPath, result, "utf-8");
+  fs.mkdirSync(path.dirname(dest), { recursive: true });
+  fs.writeFileSync(dest, result, "utf-8");
 
-  return { rewritten, appended: Object.keys(appended) };
+  return { rewritten, appended: Object.keys(appended), warnings };
 }
 
 /**
@@ -179,28 +221,47 @@ export function findEnvSource(
 
 /**
  * Copy the pristine env file from the main checkout into the worktree at the
- * same relative path. Returns the destination path, or `null` when a workspace
- * target has no env file (and no `.env.example`) and should be skipped. The
- * repo root always yields a path — an empty file is created when nothing
- * exists, matching the previous zero-config behavior.
+ * same relative path. Returns the destination path, or `null` when the target
+ * is skipped: a workspace with no env file (and no `.env.example`), or a
+ * destination wtc refuses to write (reasons pushed onto `warnings`). The
+ * repo root otherwise always yields a path — an empty file is created when
+ * nothing exists, matching the previous zero-config behavior.
+ *
+ * The worktree's branch is not trusted: a committed symlink at the env path
+ * (`.env -> ../somewhere`) or a symlinked workspace directory would make the
+ * copy write the main checkout's secrets — plus the override block — to
+ * wherever it points. A symlink at the env path is replaced by a regular
+ * copy (symlinking `.env` from main is also a common setup, and writing
+ * through it would rewrite main's own `.env`); a directory that resolves
+ * outside the worktree is refused. The env source itself is never written:
+ * when the destination *is* the source (same realpath or inode — the
+ * worktree is the main checkout, or a hard link), the target is skipped.
  */
 export function prepareEnvFile(
   repoRoot: string,
   wtPath: string,
   target: EnvTarget,
+  warnings: string[] = [],
 ): string | null {
-  const dir = target.dir ? path.join(wtPath, target.dir) : wtPath;
-  const dest = path.join(dir, target.envFileName);
+  const relDest = path.join(target.dir, target.envFileName);
   const source = findEnvSource(repoRoot, target);
+  if (!source && target.dir !== "") return null;
 
+  const label = `${target.label} env file ${relDest}`;
+  const dest = prepareWritablePath(wtPath, relDest, warnings, { label });
+  if (!dest) return null;
+  if (source && isSameFile(source, dest)) {
+    warnings.push(
+      `Skipped ${label}: it is the main checkout's own env file (the worktree is the env source); wtc never rewrites it.`,
+    );
+    return null;
+  }
+
+  fs.mkdirSync(path.dirname(dest), { recursive: true });
   if (!source) {
-    if (target.dir !== "") return null;
-    fs.mkdirSync(dir, { recursive: true });
     fs.writeFileSync(dest, "", "utf-8");
     return dest;
   }
-
-  fs.mkdirSync(dir, { recursive: true });
   fs.copyFileSync(source, dest);
   return dest;
 }
