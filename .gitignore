@@ -3,6 +3,6 @@ dist
 coverage
 *.tsbuildinfo
 
-# Secrets — never commit. .env holds NPM_TOKEN; .npmrc references it for publish.
+# Local secrets — never commit. Releases publish from CI via npm trusted publishing.
 .env
 .npmrc

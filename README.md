@@ -18,9 +18,7 @@ Every worktree gets its own ports, database, cache, and containers — **automat
 
 <img src="https://raw.githubusercontent.com/mostafasudo/worktree-compose/main/wtc-explainer.gif" alt="worktree-compose demo — isolated Docker stacks per git worktree" width="820" />
 
-<em>The full <code>wtc</code> workflow: an isolated Docker stack per worktree, several AI agents building in parallel, compared live on their own ports — then promote the winner.</em>
-<br />
-<sub>Recorded with a project-local install, where <code>npx wtc</code> runs the local bin. With the recommended global install, just type <code>wtc</code>.</sub>
+<em>The full <code>wtc</code> workflow: an isolated Docker stack per worktree, four AI agents building in parallel, compared live on their own ports — then promote the winner and clean up. <a href="https://www.worktree-compose.com/#demo">Watch the video</a>.</em>
 
 </div>
 
