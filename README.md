@@ -404,7 +404,7 @@ Per-workspace overrides, keyed by workspace name (directory name/path also work)
 
 ### `portStride`
 
-Port spacing between consecutive worktree indices (default `1`). Allocated port = `20000 + default_port + worktree_index × portStride`. Raise it (e.g. `100`) when your project exposes clustered default ports that would otherwise collide across worktrees — see [Port Allocation](#port-allocation). `wtc` warns and recommends a value when it detects a collision.
+Port spacing between consecutive worktree port slots (default `1`). Allocated port = `20000 + default_port + port_slot × portStride`. Raise it (e.g. `100`) when your project exposes clustered default ports that would otherwise collide across worktrees — see [Port Allocation](#port-allocation). `wtc` warns and recommends a value when it detects a collision.
 
 ## MCP Server
 

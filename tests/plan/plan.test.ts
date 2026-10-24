@@ -64,4 +64,16 @@ describe("buildWorktreePlans", () => {
     expect(new Set(names).size).toBe(2);
     expect(names).toContain("repo-wt-feature-v2");
   });
+
+  it("disambiguates detached worktrees at the same commit", () => {
+    const plans = buildWorktreePlans("ruker", [
+      wt("/r-a", "detached", "0123456789abcdef"),
+      wt("/r-b", "detached", "0123456789abcdef"),
+    ]);
+
+    expect(plans[0].project).not.toBe(plans[1].project);
+    expect(plans[0].slot).not.toBe(plans[1].slot);
+    expect(plans[0].project).toMatch(/^ruker-wt-0123456-/);
+    expect(plans[1].project).toMatch(/^ruker-wt-0123456-/);
+  });
 });

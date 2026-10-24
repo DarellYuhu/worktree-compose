@@ -46,8 +46,10 @@ export function getWorktrees(repoRoot: string): WorktreeInfo[] {
 
 /**
  * Stable naming label for a worktree: the branch, or the short HEAD sha when
- * detached — detached worktrees have no branch, and two of them must never
- * share a label (the old sentinel did exactly that).
+ * detached (the old sentinel gave every detached worktree the same label).
+ * A branch is checked out in at most one worktree, but two detached
+ * worktrees can sit at the same commit and share a short sha —
+ * buildWorktreePlans() disambiguates those duplicates with a path hash.
  */
 export function worktreeLabel(wt: WorktreeInfo): string {
   if (wt.branch !== "detached") return wt.branch;
