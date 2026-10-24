@@ -4,8 +4,8 @@
   "description": "Zero-config Docker Compose isolation for git worktrees",
   "type": "module",
   "bin": {
-    "worktree-compose": "./dist/cli.js",
-    "wtc": "./dist/cli.js"
+    "worktree-compose": "dist/cli.js",
+    "wtc": "dist/cli.js"
   },
   "files": [
     "dist",
