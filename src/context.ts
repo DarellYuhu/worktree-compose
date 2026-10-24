@@ -1,5 +1,5 @@
 import path from "node:path";
-import { getRepoRoot, getRepoName, detectComposeFile } from "./compose/detect.js";
+import { getMainWorktreeRoot, getRepoName, detectComposeFile } from "./compose/detect.js";
 import { parseComposeFile } from "./compose/parse.js";
 import { extractPortMappings } from "./ports/extract.js";
 import {
@@ -9,6 +9,8 @@ import {
 import type { PortCollision } from "./ports/allocate.js";
 import { loadConfig } from "./config.js";
 import { getNonMainWorktrees } from "./git/worktree.js";
+import { buildWorktreePlans } from "./plan.js";
+import type { WorktreePlan } from "./plan.js";
 import { resolveWorkspaces } from "./workspaces/resolve.js";
 import { DEFAULT_ENV_FILE } from "./sync/env.js";
 import * as log from "./utils/log.js";
@@ -35,10 +37,12 @@ export interface WtcContext {
   config: WtcConfig;
   portStride: number;
   worktrees: WorktreeInfo[];
+  /** Identity per worktree: project name + port slot, index-free. */
+  plans: WorktreePlan[];
 }
 
 export function buildContext(cli: EnvCliOptions = {}): WtcContext {
-  const repoRoot = getRepoRoot();
+  const repoRoot = getMainWorktreeRoot();
   const repoName = getRepoName(repoRoot);
 
   const composePath = detectComposeFile(repoRoot);
@@ -58,8 +62,9 @@ export function buildContext(cli: EnvCliOptions = {}): WtcContext {
     );
   }
   const worktrees = getNonMainWorktrees(repoRoot);
+  const plans = buildWorktreePlans(repoName, worktrees);
 
-  warnOnPortCollisions(portMappings, portStride, worktrees.length);
+  warnOnPortCollisions(portMappings, portStride, plans);
 
   return {
     repoRoot,
@@ -69,6 +74,7 @@ export function buildContext(cli: EnvCliOptions = {}): WtcContext {
     config,
     portStride,
     worktrees,
+    plans,
   };
 }
 
@@ -226,9 +232,11 @@ function findWorkspaceOverrides(
 function warnOnPortCollisions(
   portMappings: PortMapping[],
   portStride: number,
-  worktreeCount: number,
+  plans: WorktreePlan[],
 ): void {
-  if (worktreeCount < 2) return;
+  if (plans.length < 2) return;
+
+  const slotByLabel = new Map(plans.map((p) => [p.label, p.slot]));
 
   // Collision detection is advisory; an allocation failure here must never
   // abort the command that triggered the warning.
@@ -236,8 +244,8 @@ function warnOnPortCollisions(
   try {
     collisions = detectCrossWorktreeCollisions(
       portMappings,
+      slotByLabel,
       portStride,
-      worktreeCount,
     );
   } catch {
     return;
@@ -248,10 +256,13 @@ function warnOnPortCollisions(
     .slice(0, 3)
     .map(
       (c) =>
-        `${c.port} (wt${c.a.worktreeIndex}/${c.a.serviceName} ↔ wt${c.b.worktreeIndex}/${c.b.serviceName})`,
+        `${c.port} (${c.a.label}/${c.a.serviceName} ↔ ${c.b.label}/${c.b.serviceName})`,
     )
     .join(", ");
-  const recommended = recommendPortStride(portMappings, worktreeCount);
+  const recommended = recommendPortStride(
+    portMappings,
+    plans.map((p) => p.label),
+  );
   const fix =
     recommended > 0
       ? `Set "portStride": ${recommended} in .wtcrc.json (or package.json#wtc) to resolve.`
@@ -259,7 +270,7 @@ function warnOnPortCollisions(
 
   log.warn(
     `Cross-worktree port collisions detected with portStride=${portStride} ` +
-      `across ${worktreeCount} worktrees: ${collisions.length} collision(s), e.g. ${examples}. ${fix}`,
+      `across ${plans.length} worktrees: ${collisions.length} collision(s), e.g. ${examples}. ${fix}`,
   );
 }
 

@@ -2,7 +2,6 @@ import path from "node:path";
 import { buildContext, filterWorktrees, getEnvTargets } from "../context.js";
 import type { EnvCliOptions } from "../context.js";
 import { allocateWorktreePorts, allocationEnv } from "../ports/allocate.js";
-import { composeProjectName } from "../utils/sanitize.js";
 import { execLive } from "../utils/exec.js";
 import { syncWorktreeFiles } from "../sync/files.js";
 import { injectPortOverrides, prepareEnvFile } from "../sync/env.js";
@@ -27,16 +26,16 @@ export function startCommand(
 
   for (const wt of targets) {
     const idx = ctx.worktrees.indexOf(wt) + 1;
-    const project = composeProjectName(ctx.repoName, idx, wt.branch);
+    const plan = ctx.plans[idx - 1];
     const allocations = allocateWorktreePorts(
       ctx.portMappings,
-      idx,
+      plan.slot,
       ctx.portStride,
     );
 
     log.header(`Worktree ${idx}: ${wt.branch}`);
     log.info(`Path:    ${wt.path}`);
-    log.info(`Project: ${project}`);
+    log.info(`Project: ${plan.project}`);
     log.info(
       `Ports:   ${allocations.map((a) => `${a.envVar}=${a.port}`).join(" ")}`,
     );
@@ -65,11 +64,11 @@ export function startCommand(
       log.success(`Injected port overrides into ${injected.join(", ")}`);
     }
 
-    execLive(`docker compose -p "${project}" up -d --build`, {
+    execLive(`docker compose -p "${plan.project}" up -d --build`, {
       cwd: wt.path,
       env: {
         ...process.env,
-        COMPOSE_PROJECT_NAME: project,
+        COMPOSE_PROJECT_NAME: plan.project,
         ...allocationEnv(allocations),
       },
     });

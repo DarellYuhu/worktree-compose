@@ -9,7 +9,6 @@ import {
 } from "../context.js";
 import type { EnvCliOptions } from "../context.js";
 import { allocateWorktreePorts, allocationEnv } from "../ports/allocate.js";
-import { composeProjectName } from "../utils/sanitize.js";
 import { exec, execSafe } from "../utils/exec.js";
 import { syncWorktreeFiles } from "../sync/files.js";
 import { injectPortOverrides, prepareEnvFile } from "../sync/env.js";
@@ -33,10 +32,10 @@ function startWorktrees(indices: number[], cli: EnvCliOptions = {}): string {
 
   for (const wt of targets) {
     const idx = ctx.worktrees.indexOf(wt) + 1;
-    const project = composeProjectName(ctx.repoName, idx, wt.branch);
+    const plan = ctx.plans[idx - 1];
     const allocations = allocateWorktreePorts(
       ctx.portMappings,
-      idx,
+      plan.slot,
       ctx.portStride,
     );
 
@@ -48,11 +47,11 @@ function startWorktrees(indices: number[], cli: EnvCliOptions = {}): string {
       injectPortOverrides(envPath, allocations, target.overrides);
     }
 
-    exec(`docker compose -p "${project}" up -d --build`, {
+    exec(`docker compose -p "${plan.project}" up -d --build`, {
       cwd: wt.path,
       env: {
         ...process.env,
-        COMPOSE_PROJECT_NAME: project,
+        COMPOSE_PROJECT_NAME: plan.project,
         ...allocationEnv(allocations),
       },
     });
@@ -73,7 +72,7 @@ function stopWorktrees(indices: number[]): string {
 
   for (const wt of targets) {
     const idx = ctx.worktrees.indexOf(wt) + 1;
-    const project = composeProjectName(ctx.repoName, idx, wt.branch);
+    const project = ctx.plans[idx - 1].project;
 
     try {
       exec(`docker compose -p "${project}" down`, { cwd: wt.path });
@@ -90,14 +89,14 @@ function listWorktrees(): object {
   const ctx = buildContext();
   return ctx.worktrees.map((wt, i) => {
     const idx = i + 1;
-    const project = composeProjectName(ctx.repoName, idx, wt.branch);
+    const plan = ctx.plans[i];
     const allocations = allocateWorktreePorts(
       ctx.portMappings,
-      idx,
+      plan.slot,
       ctx.portStride,
     );
     const psOutput = execSafe(
-      `docker compose -p "${project}" ps --format json`,
+      `docker compose -p "${plan.project}" ps --format json`,
       { cwd: wt.path },
     );
     const up = psOutput !== null && psOutput.length > 2;
@@ -106,7 +105,7 @@ function listWorktrees(): object {
       index: idx,
       branch: wt.branch,
       path: wt.path,
-      project,
+      project: plan.project,
       status: up ? "up" : "down",
       ports: Object.fromEntries(allocations.map((a) => [a.envVar, a.port])),
     };

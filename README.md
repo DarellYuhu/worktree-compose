@@ -241,22 +241,22 @@ How workspace selection works:
 
 ### Port Allocation
 
-Each worktree N gets unique ports: `20000 + default_port + (worktree_index × portStride)`
+Each worktree gets unique ports derived from a stable slot: `20000 + default_port + (port_slot × portStride)`
 
-`portStride` defaults to `1`, so by default the table below holds:
+The slot comes from a hash of the worktree's branch (or short HEAD sha when detached), with collision probing so two worktrees never share a slot. Slots are independent of the worktree list order — adding or removing a worktree never moves another worktree's ports. `portStride` defaults to `1`, so by default the table below holds:
 
-| Service  | Main (default) | Worktree 1 | Worktree 2 | Worktree 3 |
+| Service  | Main (default) | Worktree A | Worktree B | Worktree C |
 |----------|---------------|------------|------------|------------|
-| postgres | 5434          | 25435      | 25436      | 25437      |
-| redis    | 6380          | 26381      | 26382      | 26383      |
-| backend  | 8000          | 28001      | 28002      | 28003      |
-| frontend | 5173          | 25174      | 25175      | 25176      |
+| postgres | 5434          | 25xxx      | 25xxx      | 25xxx      |
+| redis    | 6380          | 26xxx      | 26xxx      | 26xxx      |
+| backend  | 8000          | 28xxx      | 28xxx      | 28xxx      |
+| frontend | 5173          | 25xxx      | 25xxx      | 25xxx      |
 
-The table is illustrative — every value follows the formula above. (If an allocation would exceed `65535`, `wtc` falls back to `default_port + 100 × index`.)
+The table is illustrative — every value follows the formula above. (If an allocation would exceed `65535`, `wtc` falls back to `default_port + 100 × slot`.)
 
 #### Clustered default ports and `portStride`
 
-With the default stride of `1`, two worktrees collide on a port whenever a pair of services has default host ports whose difference equals the worktrees' index difference. Projects with **clustered** default ports (e.g. mocks on `8081`–`8086`) therefore collide even between adjacent worktrees, and the second `docker compose up` fails to bind.
+With the default stride of `1`, two worktrees collide on a port whenever a pair of services has default host ports whose difference equals the worktrees' slot difference. Projects with **clustered** default ports (e.g. mocks on `8081`–`8086`) therefore collide even between adjacent worktrees, and the second `docker compose up` fails to bind.
 
 When `wtc` detects such a collision across your current worktrees it prints a warning naming the colliding ports and the recommended stride. Set `portStride` in your config (`.wtcrc.json` or `package.json#wtc`) to spread each worktree's ports far enough apart:
 
@@ -268,7 +268,9 @@ A stride of `100` gives every worktree a 100-port band, which is collision-free 
 
 ### Container Isolation
 
-Each worktree gets its own `COMPOSE_PROJECT_NAME` — `{repo}-wt-{index}-{branch}`, lowercased and sanitized to a Docker-safe name. That means separate containers, networks, and volumes. Nothing is shared.
+Each worktree gets its own `COMPOSE_PROJECT_NAME` — `{repo}-wt-{branch}`, lowercased and sanitized to a Docker-safe name (the short HEAD sha is used instead of the branch for detached worktrees; names exceeding Docker's 63-character limit are truncated with a short hash). That means separate containers, networks, and volumes. Nothing is shared.
+
+Project names and ports are resolved from the **main worktree**, never from the directory `wtc` runs in — so running `wtc ls`, `wtc stop`, or `wtc start` from inside a linked worktree addresses the exact same stacks as running it from the repo root.
 
 ### File Sync
 
@@ -498,6 +500,8 @@ npx wtc clean
 **"Bind for 0.0.0.0:5433 failed: port is already allocated" with a custom `envFile`** — Compose interpolation does not read `.env.development` (or `env_file:`) entries for `${VAR}` substitution; it only reads the process environment, `--env-file`, and the project `.env`. `wtc` handles this by exporting allocated ports into the compose process environment. If you run `docker compose` yourself, export the port (e.g. `POSTGRES_PORT=25435 docker compose up`) or pass `--env-file .env.development`.
 
 **Stale containers** — Run `wtc clean`, or manually: `docker ps -a --filter "name=-wt-" -q | xargs docker rm -f`
+
+**Migrating from 0.2.x** — Project names changed from `{repo}-wt-{index}-{branch}` to `{repo}-wt-{branch}`, and ports now follow hash-based slots instead of list indices. Stacks started with 0.2.x keep their old names, so bring them down once after upgrading: `docker compose -p "<old-project-name>" down` (find the old names with `docker compose ls`), or remove everything worktree-related with `wtc clean` and `wtc start` fresh.
 
 ## Contributing
 

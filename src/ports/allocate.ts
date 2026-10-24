@@ -1,21 +1,25 @@
+import { fnv1a } from "../utils/sanitize.js";
 import type { PortMapping, PortAllocation } from "./types.js";
 
 const BASE_OFFSET = 20000;
 
+/** Slot space for hash-based port isolation (512 parallel worktree stacks). */
+export const PORT_SLOT_SPACE = 512;
+
 export function allocatePort(
   defaultPort: number,
-  worktreeIndex: number,
+  slot: number,
   portStride: number = 1,
 ): number {
-  let port = BASE_OFFSET + defaultPort + worktreeIndex * portStride;
+  let port = BASE_OFFSET + defaultPort + slot * portStride;
 
   if (port > 65535) {
-    port = defaultPort + 100 * worktreeIndex;
+    port = defaultPort + 100 * slot;
   }
 
   if (port > 65535 || port < 1024) {
     throw new Error(
-      `Cannot allocate port for default ${defaultPort} at worktree index ${worktreeIndex}. ` +
+      `Cannot allocate port for default ${defaultPort} at slot ${slot}. ` +
         `Computed port ${port} is out of valid range (1024-65535).`,
     );
   }
@@ -23,9 +27,38 @@ export function allocatePort(
   return port;
 }
 
+/**
+ * Deterministic slot per label: FNV-1a hash modulo the slot space, with
+ * linear probing in sorted label order so two worktrees never share a slot.
+ * Slots are independent of the worktree list order, so adding or removing a
+ * worktree never moves another worktree's ports (probing only ever affects
+ * labels that actually collided in the hash space).
+ */
+export function assignPortSlots(labels: string[]): Map<string, number> {
+  const sorted = [...new Set(labels)].sort();
+  if (sorted.length > PORT_SLOT_SPACE) {
+    throw new Error(
+      `Too many worktree stacks (${sorted.length}) for ` +
+        `${PORT_SLOT_SPACE} port slots.`,
+    );
+  }
+
+  const taken = new Set<number>();
+  const slots = new Map<string, number>();
+  for (const label of sorted) {
+    let slot = fnv1a(label) % PORT_SLOT_SPACE;
+    while (taken.has(slot)) {
+      slot = (slot + 1) % PORT_SLOT_SPACE;
+    }
+    taken.add(slot);
+    slots.set(label, slot);
+  }
+  return slots;
+}
+
 export function allocateWorktreePorts(
   mappings: PortMapping[],
-  worktreeIndex: number,
+  slot: number,
   portStride: number = 1,
 ): PortAllocation[] {
   const overridable = mappings.filter((m) => m.envVar !== null);
@@ -33,7 +66,7 @@ export function allocateWorktreePorts(
   const allocations: PortAllocation[] = overridable.map((m) => ({
     serviceName: m.serviceName,
     envVar: m.envVar!,
-    port: allocatePort(m.defaultPort, worktreeIndex, portStride),
+    port: allocatePort(m.defaultPort, slot, portStride),
     containerPort: m.containerPort,
   }));
 
@@ -41,7 +74,7 @@ export function allocateWorktreePorts(
   for (const a of allocations) {
     if (seen.has(a.port)) {
       throw new Error(
-        `Port collision: ${a.port} is assigned to multiple services in worktree ${worktreeIndex}.`,
+        `Port collision: ${a.port} is assigned to multiple services at slot ${slot}.`,
       );
     }
     seen.add(a.port);
@@ -67,7 +100,7 @@ export function allocationEnv(
 }
 
 export interface PortCollisionParty {
-  worktreeIndex: number;
+  label: string;
   serviceName: string;
 }
 
@@ -78,30 +111,31 @@ export interface PortCollision {
 }
 
 /**
- * Detect cross-worktree port collisions for a given stride across worktree
- * indices 1..worktreeCount. Returns one entry per colliding allocation.
+ * Cross-worktree collisions across the assigned slots. Probing keeps slots
+ * distinct, but a stride that divides a default-port difference can still
+ * align two services from different slots onto the same port.
  */
 export function detectCrossWorktreeCollisions(
   mappings: PortMapping[],
+  slotByLabel: Map<string, number>,
   portStride: number,
-  worktreeCount: number,
 ): PortCollision[] {
   const overridable = mappings.filter((m) => m.envVar !== null);
   const seen = new Map<number, PortCollisionParty>();
   const collisions: PortCollision[] = [];
 
-  for (let w = 1; w <= worktreeCount; w++) {
+  for (const [label, slot] of slotByLabel) {
     for (const m of overridable) {
-      const port = allocatePort(m.defaultPort, w, portStride);
+      const port = allocatePort(m.defaultPort, slot, portStride);
       const prev = seen.get(port);
       if (prev) {
         collisions.push({
           port,
           a: prev,
-          b: { worktreeIndex: w, serviceName: m.serviceName },
+          b: { label, serviceName: m.serviceName },
         });
       } else {
-        seen.set(port, { worktreeIndex: w, serviceName: m.serviceName });
+        seen.set(port, { label, serviceName: m.serviceName });
       }
     }
   }
@@ -110,21 +144,28 @@ export function detectCrossWorktreeCollisions(
 }
 
 const STRIDE_SEARCH_CAP = 4096;
+const STRIDE_HORIZON = 100;
 
 /**
- * Smallest portStride that is collision-free across a generous worktree
- * horizon (so the suggestion survives adding more worktrees). Returns -1 if
- * no stride within the search cap works — which signals duplicate default
- * ports within a worktree, a case the per-worktree dedup guard already rejects.
+ * Smallest portStride that is collision-free across a generous horizon of
+ * labels (the actual ones plus synthetic future stacks, so the suggestion
+ * survives adding worktrees). Returns -1 if no stride within the search cap
+ * works — which signals duplicate default ports within a worktree, a case the
+ * per-worktree dedup guard already rejects.
  */
 export function recommendPortStride(
   mappings: PortMapping[],
-  worktreeCount: number,
+  labels: string[],
 ): number {
-  const horizon = Math.max(worktreeCount, 100);
+  const horizon = [...new Set(labels)];
+  for (let i = 0; horizon.length < STRIDE_HORIZON; i++) {
+    horizon.push(`wtc-future-${i}`);
+  }
+  const slots = assignPortSlots(horizon);
+
   for (let s = 1; s <= STRIDE_SEARCH_CAP; s++) {
     try {
-      if (detectCrossWorktreeCollisions(mappings, s, horizon).length === 0) {
+      if (detectCrossWorktreeCollisions(mappings, slots, s).length === 0) {
         return s;
       }
     } catch {

@@ -2,7 +2,6 @@ import Table from "cli-table3";
 import chalk from "chalk";
 import { buildContext } from "../context.js";
 import { allocateWorktreePorts } from "../ports/allocate.js";
-import { composeProjectName } from "../utils/sanitize.js";
 import { execSafe } from "../utils/exec.js";
 import { warn } from "../utils/log.js";
 import { suggestEnvVar } from "../ports/extract.js";
@@ -59,13 +58,13 @@ export function listCommand(): void {
   for (let i = 0; i < ctx.worktrees.length; i++) {
     const wt = ctx.worktrees[i];
     const idx = i + 1;
-    const project = composeProjectName(ctx.repoName, idx, wt.branch);
+    const plan = ctx.plans[i];
     const allocations = allocateWorktreePorts(
       ctx.portMappings,
-      idx,
+      plan.slot,
       ctx.portStride,
     );
-    const up = isWorktreeUp(project, wt.path);
+    const up = isWorktreeUp(plan.project, wt.path);
 
     const ports = allocations
       .map((a) => `${a.serviceName}:${a.port}`)

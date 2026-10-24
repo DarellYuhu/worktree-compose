@@ -1,20 +1,20 @@
-import { getRepoRoot, getRepoName } from "../compose/detect.js";
+import { getMainWorktreeRoot, getRepoName } from "../compose/detect.js";
 import { getNonMainWorktrees } from "../git/worktree.js";
-import { composeProjectName } from "../utils/sanitize.js";
+import { buildWorktreePlans } from "../plan.js";
 import { exec, execSafe } from "../utils/exec.js";
 import * as log from "../utils/log.js";
 
 export function cleanCommand(): void {
-  const repoRoot = getRepoRoot();
+  const repoRoot = getMainWorktreeRoot();
   const repoName = getRepoName(repoRoot);
   const worktrees = getNonMainWorktrees(repoRoot);
+  const plans = buildWorktreePlans(repoName, worktrees);
 
   const currentWt = execSafe("git rev-parse --show-toplevel") ?? repoRoot;
 
   for (let i = 0; i < worktrees.length; i++) {
     const wt = worktrees[i];
-    const idx = i + 1;
-    const project = composeProjectName(repoName, idx, wt.branch);
+    const project = plans[i].project;
 
     log.info(`Stopping containers for ${project}...`);
     try {

@@ -1,5 +1,4 @@
 import { buildContext, filterWorktrees } from "../context.js";
-import { composeProjectName } from "../utils/sanitize.js";
 import { execLive } from "../utils/exec.js";
 import * as log from "../utils/log.js";
 
@@ -15,7 +14,7 @@ export function stopCommand(indices: number[]): void {
 
   for (const wt of targets) {
     const idx = ctx.worktrees.indexOf(wt) + 1;
-    const project = composeProjectName(ctx.repoName, idx, wt.branch);
+    const project = ctx.plans[idx - 1].project;
 
     log.info(`Stopping ${project}...`);
 
